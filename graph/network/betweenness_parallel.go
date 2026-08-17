@@ -145,17 +145,7 @@ func brandes_parallel(ctx context.Context, g graph.Graph, accumulate func(s grap
 			workerDelta := make(map[int64]float64, numGraphNodes)  // вклад v в центральность других узлов из-за путей от s.
 			var workerQueue linear.NodeQueue                       // Очередь для BFS.
 
-			var s graph.Node
-			var ok bool
-			for {
-				select {
-				case s, ok = <-sChan:
-					if !ok {
-						return
-					}
-				case <-ctx.Done():
-					return
-				}
+			for s := range sChan {
 				sID := s.ID()
 
 				// Part 1 - BFS and Shortest Path Counting from s ---
@@ -206,9 +196,13 @@ func brandes_parallel(ctx context.Context, g graph.Graph, accumulate func(s grap
 			}
 		})
 	}
-
+outerLoop:
 	for _, sNode := range nodesList {
-		sChan <- sNode
+		select {
+		case <-ctx.Done():
+			break outerLoop
+		case sChan <- sNode:
+		}
 	}
 	close(sChan)
 
