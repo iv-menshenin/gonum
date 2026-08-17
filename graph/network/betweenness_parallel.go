@@ -1,6 +1,7 @@
 package network
 
 import (
+	"context"
 	"runtime"
 	"sync"
 
@@ -14,7 +15,7 @@ import (
 //
 // where \sigma_{st} and \sigma_{st}(v) are the number of shortest paths from s to t,
 // and the subset of those paths containing v respectively.
-func BetweennessParallel(g graph.Graph) map[int64]float64 {
+func BetweennessParallel(ctx context.Context, g graph.Graph) map[int64]float64 {
 	// cb хранит итоговые значения центральности по посредничеству для каждого узла.
 	// Ключ - ID узла, значение - его центральность.
 	cb := make(map[int64]float64)
@@ -22,7 +23,7 @@ func BetweennessParallel(g graph.Graph) map[int64]float64 {
 
 	// Функция accumulate вызывается для каждой исходной вершины s.
 	// Она вычисляет вклады в cb, основанные на путях, исходящих из s.
-	brandes_parallel(g, func(s graph.Node, stack linear.NodeStack, p map[int64][]graph.Node, delta, sigma map[int64]float64) {
+	brandes_parallel(ctx, g, func(s graph.Node, stack linear.NodeStack, p map[int64][]graph.Node, delta, sigma map[int64]float64) {
 		sID := s.ID()
 		// Чтобы не блочить на каждое сложение, храним вклады от s тут
 		sNodeContributions := make(map[int64]float64)
@@ -67,12 +68,12 @@ func BetweennessParallel(g graph.Graph) map[int64]float64 {
 //
 // If g is undirected, edges are retained such that u.ID < v.ID where u and v are
 // the nodes of e.
-func EdgeBetweennessParallel(g graph.Graph) map[[2]int64]float64 {
+func EdgeBetweennessParallel(ctx context.Context, g graph.Graph) map[[2]int64]float64 {
 	_, isUndirected := g.(graph.Undirected)
 	cb := make(map[[2]int64]float64)
 	var mu sync.Mutex // синхронизация доступа к cb
 
-	brandes_parallel(g, func(s graph.Node, stack linear.NodeStack, p map[int64][]graph.Node, delta, sigma map[int64]float64) {
+	brandes_parallel(ctx, g, func(s graph.Node, stack linear.NodeStack, p map[int64][]graph.Node, delta, sigma map[int64]float64) {
 		// Чтобы не блочить на каждое сложение, храним вклады от s тут
 		sEdgeContributions := make(map[[2]int64]float64)
 
@@ -118,7 +119,7 @@ func EdgeBetweennessParallel(g graph.Graph) map[[2]int64]float64 {
 // brandes_parallel - это общий распараллеленный код для BetweennessParallel и EdgeBetweennessParallel
 // Соответствует algorithm 1 в http://algo.uni-konstanz.de/publications/b-vspbc-08.pdf
 // Внешний цикл (по нодам 's') распараллелен (они могут считаться независимо).
-func brandes_parallel(g graph.Graph, accumulate func(s graph.Node, stack linear.NodeStack, p map[int64][]graph.Node, delta, sigma map[int64]float64)) {
+func brandes_parallel(ctx context.Context, g graph.Graph, accumulate func(s graph.Node, stack linear.NodeStack, p map[int64][]graph.Node, delta, sigma map[int64]float64)) {
 	nodesList := graph.NodesOf(g.Nodes())
 	numGraphNodes := len(nodesList)
 
@@ -144,7 +145,17 @@ func brandes_parallel(g graph.Graph, accumulate func(s graph.Node, stack linear.
 			workerDelta := make(map[int64]float64, numGraphNodes)  // вклад v в центральность других узлов из-за путей от s.
 			var workerQueue linear.NodeQueue                       // Очередь для BFS.
 
-			for s := range sChan {
+			var s graph.Node
+			var ok bool
+			for {
+				select {
+				case s, ok = <-sChan:
+					if !ok {
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
 				sID := s.ID()
 
 				// Part 1 - BFS and Shortest Path Counting from s ---
